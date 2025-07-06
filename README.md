@@ -1,0 +1,1 @@
+Directed by Dr. Eliana Christou and Dr. Wenyu Gao, I wrote these (mostly Machine Learning) models with the goal of predicting Systolic Blood Pressure based on Gender, Coronary Heart Disease, Age, BMI, and Activity (as a function). We used the CDC's NHANES dataset from 2011-2012, and 2013-2014.
