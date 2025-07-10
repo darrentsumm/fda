@@ -5,6 +5,7 @@ R code is posted in this repository, along with descriptions of each model in th
 fSIR: rpubs.com/darrentsumm/NHANESfSIR
 
 RNN: rpubs.com/darrentsumm/NHANESTrueRNN
+
 RNN with GRU: rpubs.com/darrentsumm/NHANESRNNwGRU
 
 Crainiceanu, Ciprian, et al. “About the Authors.” FDA with R, 2023,     functionaldataanalysis.org/about_authors.html. 
