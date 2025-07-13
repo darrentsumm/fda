@@ -1,0 +1,190 @@
+---
+title: "10-Fold FRF1"
+output: html_notebook
+---
+
+```{r import}
+library(fda.usc)
+library(randomForest)
+library(caret)
+library(dplyr)
+library(tidyr)
+
+NHANES <- readRDS('BP_stats_no_enhance.rds')
+```
+
+```{r data adjustment}
+n <- nrow(NHANES)
+
+# Smooth MIMS
+MIMS <- NHANES$MIMS
+MIMS <- unclass(MIMS)
+argvals <- seq(0, 1440, length.out = 1440)
+MIMS_basis <- create.bspline.basis(c(0, 1440), nbasis = 20)
+MIMS_fd <- Data2fd(argvals = argvals, y = t(MIMS), basisobj = MIMS_basis)
+```
+
+```{r 10-Fold Cross Validation}
+set.seed(1)
+folds <- createFolds(1:n, k = 10)
+importance_list <- list()
+
+cv_results <- data.frame(
+  Fold = 1:10,
+  RMSE = numeric(10),
+  R_squared = numeric(10),
+  Coverage = numeric(10)
+)
+
+for (i in 1:10) {
+  set.seed(1)
+  cat("Processing Fold:", i, "\n")
+  
+  # Train/Test split
+  test_idx <- folds[[i]]
+  train_idx <- setdiff(1:n, test_idx)
+  
+  scalar_train <- data.frame(
+    bpS = NHANES$BPS_avg[train_idx],
+    gender = NHANES$gender[train_idx],
+    CHD = NHANES$CHD[train_idx],
+    age = NHANES$age[train_idx],
+    BMI = NHANES$BMI[train_idx]
+  )
+  scalar_test <- data.frame(
+    bpS = NHANES$BPS_avg[test_idx],
+    gender = NHANES$gender[test_idx],
+    CHD = NHANES$CHD[test_idx],
+    age = NHANES$age[test_idx],
+    BMI = NHANES$BMI[test_idx]
+  )
+  
+  MIMS_fd_train <- MIMS_fd[train_idx]
+  MIMS_fd_test  <- MIMS_fd[test_idx]
+  
+  MIMS_coef_train <- t(MIMS_fd_train$coefs)
+  MIMS_coef_test <- t(MIMS_fd_test$coefs)
+  colnames(MIMS_coef_train) <- paste0("F", 1:ncol(MIMS_coef_train))
+  colnames(MIMS_coef_test) <- paste0("F", 1:ncol(MIMS_coef_test))
+  
+  rf_data_train <- cbind(scalar_train, MIMS_coef_train)
+  rf_data_test <- cbind(scalar_test, MIMS_coef_test)
+  
+  # Train Model
+  set.seed(1)
+  frf_model <- randomForest(bpS ~ ., data = rf_data_train, ntree = 500, mtry = 10, importance = TRUE, keep.inbag = TRUE)
+  
+  importance_list[[i]] <- importance(frf_model, type = 1)
+  
+  # Predict
+  preds_frf <- predict(frf_model, newdata = rf_data_test, predict.all = TRUE)
+  pred_vec <- preds_frf$aggregate
+  
+  # Metrics
+  rmse <- sqrt(mean((scalar_test$bpS - pred_vec)^2))
+
+  ss_total <- sum((scalar_test$bpS - mean(scalar_test$bpS))^2)
+  ss_res <- sum((scalar_test$bpS - pred_vec)^2)
+  r_squared <- 1 - (ss_res / ss_total)
+  
+  lower_bounds <- apply(preds_frf$individual, 1, quantile, probs = 0.025)
+  upper_bounds <- apply(preds_frf$individual, 1, quantile, probs = 0.975)
+  coverage <- mean(scalar_test$bpS >= lower_bounds & scalar_test$bpS <= upper_bounds)
+  
+  cv_results$RMSE[i] <- rmse
+  cv_results$R_squared[i] <- r_squared
+  cv_results$Coverage[i] <- coverage
+}
+```
+
+```{r Metrics}
+print(cv_results)
+
+avg_rmse <- mean(cv_results$RMSE)
+sd_rmse <- sd(cv_results$RMSE)
+avg_r_squared <- mean(cv_results$R_squared)
+sd_r_squared <- sd(cv_results$R_squared)
+avg_coverage <- mean(cv_results$Coverage)
+sd_coverage <- sd(cv_results$Coverage)
+
+cat("Average Test RMSE: ", round(avg_rmse, 3), " (SD:", round(sd_rmse, 3), ")\n")
+cat("Average Test R^2:", round(avg_r_squared, 3), " (SD:", round(sd_r_squared, 3), ")\n")
+cat("Average Empirical 95% Coverage Rate:", round(avg_coverage * 100, 2), "% (SD:", round(sd_coverage * 100, 2), "%)\n")
+```
+
+```{r Variable Importance}
+importance <- do.call(cbind, importance_list)
+colnames(importance) <- paste0("Fold", seq_len(ncol(importance)))
+importance_df <- importance %>%
+  as.data.frame() %>%
+  mutate(Variable = rownames(.)) %>%
+  pivot_longer(
+    cols = -Variable,
+    names_to = "Fold",
+    values_to = "Importance"
+  )
+avg_importance <- importance_df %>%
+  group_by(Variable) %>%
+  summarise(
+    Avg_Importance = mean(Importance),
+    Std_Dev = sd(Importance)
+  )
+
+cat("Average Variable Importance (10-Fold CV)")
+print(avg_importance)
+
+ggplot(avg_importance, aes(x = reorder(Variable, Avg_Importance), y = Avg_Importance)) +
+  geom_col(fill = "darkgreen") +
+  geom_errorbar(
+    aes(ymin = Avg_Importance - Std_Dev, ymax = Avg_Importance + Std_Dev),
+    width = 0.2
+  ) +
+  coord_flip() +
+  labs(
+    title = "Average Importance from 10-Fold CV",
+    subtitle = "Error bars show standard deviation across folds",
+    x = "Variable",
+    y = "Average % Increase in MSE"
+  ) +
+  theme_minimal()
+```
+
+
+```{r heatmap}
+results <- data.frame(actual = scalar_test$bpS, predicted = pred_vec)
+#2d color
+zones <- data.frame(
+  xmin = c(50, 100, 120, 130, 140),
+  xmax = c(100, 120, 130, 140, Inf),
+  fill = c("Low", "Normal", "Elevated", "ISH-S1", "S2"),
+  color = c("lightblue", "green3", "yellow", "orange", "red")
+)
+
+zone_rects <- expand.grid(x = 1:nrow(zones), y = 1:nrow(zones))
+
+max_risk_index <- pmax(zone_rects$x, zone_rects$y)
+zone_rects <- cbind(
+  zone_rects,
+  xmin = zones$xmin[zone_rects$x],
+  xmax = zones$xmax[zone_rects$x],
+  ymin = zones$xmin[zone_rects$y],
+  ymax = zones$xmax[zone_rects$y],
+  fill = zones$color[max_risk_index]
+)
+
+ggplot() +
+  geom_rect(data = zone_rects, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = fill), alpha = 0.4) +
+  scale_fill_identity() +
+  geom_point(data = results, aes(x = predicted, y = actual), color = "blue", size = 0.5) +
+  geom_abline(intercept = -20, slope = 1, linetype = "dashed", color = "black", linewidth = 0.4) +
+  geom_abline(intercept = 20, slope = 1, linetype = "dashed", color = "black", linewidth = 0.4) +
+  xlim(50, 150) +
+  ylim(50, 250) +
+  coord_cartesian(xlim = c(50, 200), ylim = c(50, 200), expand = FALSE) +
+  scale_x_continuous(breaks = c(50, 80, 100, 120, 140, 150)) +
+  scale_y_continuous(breaks = c(50, 80, 100, 120, 140, 150)) +
+  labs(x = "Predicted BP", y = "True BP") +
+  coord_fixed() +
+  theme_minimal()
+```
+
